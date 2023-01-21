@@ -7,19 +7,22 @@ gGlobalSyncTable.hideAndSeek = true
 
 -- keep track of round info
 ROUND_STATE_WAIT        = 0
-ROUND_STATE_ACTIVE      = 1
-ROUND_STATE_SEEKERS_WIN = 2
-ROUND_STATE_HIDERS_WIN  = 3
-ROUND_STATE_UNKNOWN_END = 4
+ROUND_STATE_HIDE        = 1
+ROUND_STATE_ACTIVE      = 2
+ROUND_STATE_SEEKERS_WIN = 3
+ROUND_STATE_HIDERS_WIN  = 4
+ROUND_STATE_UNKNOWN_END = 5
 gGlobalSyncTable.touchTag = true
 gGlobalSyncTable.campingTimer = false -- enable/disable camping timer
 gGlobalSyncTable.hiderCaps = true
 gGlobalSyncTable.seekerCaps = false
 gGlobalSyncTable.banKoopaShell = true
 gGlobalSyncTable.banRR = true
+gGlobalSyncTable.randomLevel = false
 gGlobalSyncTable.roundState   = ROUND_STATE_WAIT -- current round state
 gGlobalSyncTable.displayTimer = 0 -- the displayed timer
 sRoundTimer        = 0            -- the server's round timer
+sRoundHideTimeout = 20 * 30       -- twenty seconds
 sRoundStartTimeout = 15 * 30      -- fifteen seconds
 sRoundEndTimeout   = 3 * 60 * 30  -- three minutes
 
@@ -37,6 +40,23 @@ sDistanceTimeout = 10 * 30 -- ten seconds
 
 -- flashing 'keep moving' index
 sFlashingIndex = 0
+
+sLevelChoices = {
+    {Level = LEVEL_BOB, Area = 1},
+    {Level = LEVEL_CCM, Area = 1},
+    {Level = LEVEL_WF, Area = 1},
+    {Level = LEVEL_JRB, Area = 1},
+    {Level = LEVEL_BBH, Area = 1},
+    {Level = LEVEL_LLL, Area = 1},
+    {Level = LEVEL_SSL, Area = 1},
+    {Level = LEVEL_HMC, Area = 1},
+    {Level = LEVEL_DDD, Area = 1},
+    {Level = LEVEL_TTM, Area = 1},
+    {Level = LEVEL_SL, Area = 1},
+    {Level = LEVEL_WDW, Area = 1},
+    {Level = LEVEL_TTC, Area = 1},
+    {Level = LEVEL_THI, Area = 1}
+}
 
 -- pu prevention
 local puX = 0
@@ -72,6 +92,16 @@ function server_update(m)
         gGlobalSyncTable.roundState = ROUND_STATE_UNKNOWN_END
         sRoundTimer = 0
         gGlobalSyncTable.displayTimer = 0
+    end
+
+    -- check to see if it's time to seek from a hide round
+    if gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
+        if sRoundTimer > sRoundHideTimeout or not hasSeeker or not hasHider then
+            gGlobalSyncTable.roundState = ROUND_STATE_ACTIVE
+            sRoundTimer = 0
+            gGlobalSyncTable.displayTimer = 0
+        end
+        return
     end
 
     -- check to see if the round should end
@@ -114,8 +144,20 @@ function server_update(m)
             s.seeking = true
         end
 
+        -- shuffle levels
+        if gGlobalSyncTable.randomLevel then
+            local randNum = math.random(#sLevelChoices)
+            local levelInfo = sLevelChoices[randNum]
+            gGlobalSyncTable.nextLevel = levelInfo.Level
+            gGlobalSyncTable.nextAct = math.random(6) - 1
+        end
+
         -- set round state
-        gGlobalSyncTable.roundState = ROUND_STATE_ACTIVE
+        if gGlobalSyncTable.randomLevel then
+            gGlobalSyncTable.roundState = ROUND_STATE_HIDE
+        else
+            gGlobalSyncTable.roundState = ROUND_STATE_ACTIVE
+        end
         sRoundTimer = 0
         gGlobalSyncTable.displayTimer = 0
 
@@ -189,6 +231,11 @@ function mario_update(m)
         return
     end
 
+    -- catch death scenarios that are not covered by the normal death hook
+    if gGlobalSyncTable.randomLevel and m.action == ACT_DEATH_EXIT then
+        on_death(m)
+    end
+
     if (m.flags & MARIO_VANISH_CAP) ~= 0 then
         m.flags = m.flags & ~MARIO_VANISH_CAP --Always Remove Vanish Cap Cuz Broken
         stop_cap_music()
@@ -235,16 +282,38 @@ function mario_update(m)
             warp_to_castle(LEVEL_BITS)
         end
 
-        if gPlayerSyncTable[m.playerIndex].seeking and gGlobalSyncTable.displayTimer == 0 and gGlobalSyncTable.roundState == ROUND_STATE_ACTIVE then
-            warp_to_level(gLevelValues.entryLevel, 1, 0)
+        local transportRound
+        if gGlobalSyncTable.randomLevel then
+            transportRound = ROUND_STATE_HIDE
+        else
+            transportRound = ROUND_STATE_ACTIVE
+        end
+
+        local playerShouldWarp = gPlayerSyncTable[m.playerIndex].seeking or gGlobalSyncTable.randomLevel;
+
+        if playerShouldWarp and gGlobalSyncTable.displayTimer == 0 and gGlobalSyncTable.roundState == transportRound then
+            local level = gLevelValues.entryLevel
+            local act = 0
+
+            if gGlobalSyncTable.randomLevel then
+                level = gGlobalSyncTable.nextLevel
+                act = gGlobalSyncTable.nextAct
+            end
+
+            warp_to_level(level, 1, act)
         end
     end
 
     -- display all seekers as metal
     if s.seeking then
         m.marioBodyState.modelState = MODEL_STATE_METAL
-       
         m.health = 0x880
+
+        -- seeking marios should sleep during the hide round, it's cute
+        if gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
+            m.action = ACT_SLEEPING
+            return
+        end
     end
     
     -- pu prevention
@@ -283,6 +352,12 @@ function mario_before_phys_step(m)
         return
     end
 
+    if gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
+        m.vel.x = 0
+        m.vel.z = 0
+        return
+    end
+
     local hScale = 1.0
     local vScale = 1.0
 
@@ -306,7 +381,7 @@ end
 
 function on_pvp_attack(attacker, victim)
     -- check gamemode enabled state
-    if not gGlobalSyncTable.hideAndSeek then
+    if not gGlobalSyncTable.hideAndSeek or gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
         return
     end
 
@@ -344,6 +419,10 @@ function hud_top_render()
     if gGlobalSyncTable.roundState == ROUND_STATE_WAIT then
         seconds = 60
         text = 'waiting for players'
+    elseif gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
+        seconds = math.floor(sRoundHideTimeout / 30 - gGlobalSyncTable.displayTimer)
+        if seconds < 0 then seconds = 0 end
+        text = 'hiders have ' .. seconds .. ' seconds'
     elseif gGlobalSyncTable.roundState == ROUND_STATE_ACTIVE then
         seconds = math.floor(sRoundEndTimeout / 30 - gGlobalSyncTable.displayTimer)
         if seconds < 0 then seconds = 0 end
@@ -441,11 +520,27 @@ function hud_center_render()
     djui_hud_print_text(text, x, y, scale);
 end
 
+function hud_hide_render()
+    if not gGlobalSyncTable.hideAndSeek or gGlobalSyncTable.roundState ~= ROUND_STATE_HIDE then
+        return
+    end
+
+    local m = gPlayerSyncTable[0]
+
+    if m.seeking then
+        local screenWidth = djui_hud_get_screen_width()
+        local screenHeight = djui_hud_get_screen_height()
+        djui_hud_set_color(0, 0, 0, 255)
+        djui_hud_render_rect(0, 0, screenWidth + 1, screenHeight + 1)
+    end
+end
+
 function on_hud_render()
     -- render to N64 screen space, with the HUD font
     djui_hud_set_resolution(RESOLUTION_N64)
     djui_hud_set_font(FONT_NORMAL)
 
+    hud_hide_render()
     hud_top_render()
     hud_bottom_render()
     hud_center_render()
@@ -558,7 +653,25 @@ function on_ban_rr_command(msg)
     return false
 end
 
+function on_random_level_command(msg)
+    if msg == 'on' then
+        djui_chat_message_create('Random levels: enabled')
+        gGlobalSyncTable.randomLevel = true
+        return true
+    elseif msg == 'off' then
+        djui_chat_message_create('Random levels: disabled')
+        gGlobalSyncTable.randomLevel = false
+        return true
+    end
+
+    return false
+end
+
 function on_pause_exit(exitToCastle)
+    -- always prevent exit in random level mode
+    if gGlobalSyncTable.randomLevel then
+        return false
+    end
     local s = gPlayerSyncTable[0]
     if not s.seeking then
         for i=1,(MAX_PLAYERS-1) do
@@ -629,7 +742,7 @@ end
 function on_interact(m, obj, intee)
     if intee == INTERACT_PLAYER then
 
-        if not gGlobalSyncTable.touchTag then
+        if not gGlobalSyncTable.touchTag or gGlobalSyncTable.roundState == ROUND_STATE_HIDE then
             return
         end
 
@@ -659,6 +772,24 @@ function allow_interact(m, obj, intee)
     if intee == INTERACT_KOOPA_SHELL and gGlobalSyncTable.banKoopaShell then
         return false
     end
+
+    -- Do not allow collecting stars or keys during random level mode
+    if intee == INTERACT_STAR_OR_KEY and gGlobalSyncTable.randomLevel then
+        return false
+    end
+end
+
+function on_death(m)
+    -- don't allow player to leave level via death when random level is enabled
+    if gGlobalSyncTable.randomLevel then
+        warp_to_level(gGlobalSyncTable.nextLevel, 1, gGlobalSyncTable.nextAct)
+        m.health = 0x880
+        local s = gPlayerSyncTable[m.playerIndex]
+        s.seeking = true
+        return false
+    else
+        return true
+    end
 end
 
 -----------
@@ -684,6 +815,7 @@ if network_is_server() then
   hook_chat_command('anti-camp', "[on|off] turn the anti-camp timer on or off", on_anti_camp_command)
   hook_chat_command('koopa-shell', "[on|off] Turn the koopa shell on or off", on_koopa_shell_command)
   hook_chat_command('ban-rr', "[on|off] Turn Banning RR on or off", on_ban_rr_command)
+  hook_chat_command('random-level', "[on|off] Turn on random stage mode", on_random_level_command)
 end
 
 -- call functions when certain sync table values change
@@ -693,4 +825,3 @@ for i=0,(MAX_PLAYERS-1) do
     hook_on_sync_table_change(gPlayerSyncTable[i], 'seeking', i, on_seeking_changed)
     network_player_set_description(gNetworkPlayers[i], "seeker", 255, 64, 64, 255)
 end
-
